@@ -67,26 +67,77 @@ class TestPHY(unittest.TestCase):
                     yield
                 self.assertEqual(data[i], (yield dut.source.data))
                 yield
-        dut = SDPHYR(cmd=True)
+        dut = SDPHYR(cmd=True, data_width=1)
         run_simulation(dut, [stim_gen(dut), check_gen(dut)])
 
-    def test_phyr_data(self):
-        def stim_gen(dut):
-            data = [0xf, 0xf, 0x0, 0x5, 0xa, 0x5, 0x1, 0x2, 0x3]
-            yield dut.pads_in.valid.eq(1)
-            for i in range(len(data)):
-                yield dut.pads_in.data.i.eq(data[i])
+
+    def phyrd_stim_gen1(self, dut):
+        #       --s0x5a----0x51----0x23----
+        data = "--__-_--_-__-_-___-__-___--"
+        yield dut.pads_in.valid.eq(1)
+        # self.assertEqual((yield dut.bus_width), BUSWIDTH_1)
+        for i in range(len(data)):
+            d = c2bool(data[i])
+            # set other bits, should be ignored
+            d |= i << 1
+            yield dut.pads_in.data.i.eq(d)
+            yield
+
+    def phyrd_stim_gen4(self, dut):
+        # high nibble set to check it's ignored
+        data = [0xf, 0xf, 0x0, 0x5, 0x8a, 0x85, 0x91, 0xf2, 0x3]
+        yield dut.pads_in.valid.eq(1)
+        # self.assertEqual((yield dut.bus_width), BUSWIDTH_4)
+        for i in range(len(data)):
+            yield dut.pads_in.data.i.eq(data[i])
+            yield
+
+    def phyrd_stim_gen8(self, dut):
+        data = [0x0, 0x5a, 0x51, 0x23]
+        yield dut.pads_in.valid.eq(1)
+        # self.assertEqual((yield dut.bus_width), BUSWIDTH_8)
+        for i in range(len(data)):
+            yield dut.pads_in.data.i.eq(data[i])
+            yield
+
+    def phyrd_check_gen(self, dut):
+        data = [0x5a, 0x51, 0x23]
+        yield dut.source.ready.eq(1)
+        for i in range(len(data)):
+            while (yield dut.source.valid) == 0:
                 yield
-        def check_gen(dut):
-            data = [0x5a, 0x51, 0x23]
-            yield dut.source.ready.eq(1)
-            for i in range(len(data)):
-                while (yield dut.source.valid) == 0:
-                    yield
-                self.assertEqual(data[i], (yield dut.source.data))
-                yield
+            d = yield dut.source.data
+            print(i, hex(data[i]), hex(d))
+            self.assertEqual(data[i], d)
+            yield
+
+    def test_phyr_data1(self):
+        dut = SDPHYR(data=True, data_width=1, skip_start_bit=True)
+        run_simulation(dut, [self.phyrd_stim_gen1(dut), self.phyrd_check_gen(dut)])
+
+    def test_phyr_data4(self):
         dut = SDPHYR(data=True, data_width=4, skip_start_bit=True)
-        run_simulation(dut, [stim_gen(dut), check_gen(dut)])
+        run_simulation(dut, [self.phyrd_stim_gen4(dut), self.phyrd_check_gen(dut)])
+
+    def test_phyr_data8(self):
+        dut = SDPHYR(data=True, data_width=8, skip_start_bit=True)
+        run_simulation(dut, [self.phyrd_stim_gen8(dut), self.phyrd_check_gen(dut)])
+
+    def test_phyr_nonconst(self):
+        dut = SDPHYR(data=True, skip_start_bit=True)
+        # width 4
+        yield dut.bus_width.eq(BUSWIDTH_4)
+        run_simulation(dut, [self.phyrd_stim_gen4(dut), self.phyrd_check_gen(dut)])
+
+        # same again
+        yield dut.bus_width.eq(BUSWIDTH_4)
+        run_simulation(dut, [self.phyrd_stim_gen4(dut), self.phyrd_check_gen(dut)])
+
+        yield dut.bus_width.eq(BUSWIDTH_1)
+        run_simulation(dut, [self.phyrd_stim_gen1(dut), self.phyrd_check_gen(dut)])
+
+        yield dut.bus_width.eq(BUSWIDTH_8)
+        run_simulation(dut, [self.phyrd_stim_gen8(dut), self.phyrd_check_gen(dut)])
 
     def test_phyinit(self):
         def gen(dut):

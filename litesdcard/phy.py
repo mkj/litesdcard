@@ -18,6 +18,12 @@ from litex.soc.interconnect import stream
 
 from litesdcard.common import *
 
+# 0 is reserved so software can detect older gateware that
+# had fixed buswidth 4
+BUSWIDTH_1 = 1
+BUSWIDTH_4 = 2
+BUSWIDTH_8 = 3
+
 # Pads ---------------------------------------------------------------------------------------------
 
 _sdpads_layout = [
@@ -28,8 +34,8 @@ _sdpads_layout = [
         ("oe", 1)
     ]),
     ("data", [
-        ("i",  4),
-        ("o",  4),
+        ("i",  8),
+        ("o",  8),
         ("oe", 1)
     ]),
     ("data_i_ce", 1),
@@ -75,30 +81,56 @@ class SDPHYClocker(Module, AutoCSR):
 
 @ResetInserter()
 class SDPHYR(Module):
-    def __init__(self, cmd=False, data=False, data_width=1, skip_start_bit=False):
+    """ data_width is a fixed width 1,4,8, or self.bus_width can be set to 0,1,2 """
+    def __init__(self, cmd=False, data=False, data_width=None, skip_start_bit=False):
         assert cmd or data
         self.pads_in  = pads_in = stream.Endpoint(_sdpads_layout)
         self.source   = source  = stream.Endpoint([("data", 8)])
 
+        self.bus_width = Signal(2)
+
         # # #
 
-        pads_in_data = pads_in.cmd.i[:data_width] if cmd else pads_in.data.i[:data_width]
+        if data_width == 1:
+            self.comb += self.bus_width.eq(BUSWIDTH_1)
+        elif data_width == 4:
+            self.comb += self.bus_width.eq(BUSWIDTH_4)
+        elif data_width == 8:
+            self.comb += self.bus_width.eq(BUSWIDTH_8)
+
+        pads_in_data = pads_in.cmd.i if cmd else pads_in.data.i
 
         # Xfer starts when data == 0
         start = Signal()
         run   = Signal()
-        self.comb += start.eq(pads_in_data == 0)
+        self.comb += Case(self.bus_width, {
+                BUSWIDTH_1: start.eq(pads_in_data[0] == 0),
+                BUSWIDTH_4: start.eq(pads_in_data[:4] == 0),
+                BUSWIDTH_8: start.eq(pads_in_data[:8] == 0),
+        })
         self.sync += If(pads_in.valid, run.eq(start | run))
 
-        # Convert data to 8-bit stream
-        converter = stream.Converter(data_width, 8, reverse=True)
-        buf       = stream.Buffer([("data", 8)])
-        self.submodules += converter, buf
+        # Convert data to 8-bit stream.
+        # 8-8 seems a bit silly, perhaps it just falls out?
+        conv1 = stream.Converter(1, 8, reverse=True)
+        conv4 = stream.Converter(4, 8, reverse=True)
+        conv8 = stream.Converter(8, 8, reverse=True)
+        buf = stream.Buffer([("data", 8)])
+        self.submodules += conv1, conv4, conv8, buf
         self.comb += [
-            converter.sink.valid.eq(pads_in.valid & (run if skip_start_bit else (start | run))),
-            converter.sink.data.eq(pads_in_data),
-            converter.source.connect(buf.sink),
-            buf.source.connect(source)
+            conv1.sink.valid.eq(pads_in.valid & (run if skip_start_bit else (start | run))),
+            conv4.sink.valid.eq(pads_in.valid & (run if skip_start_bit else (start | run))),
+            conv8.sink.valid.eq(pads_in.valid & (run if skip_start_bit else (start | run))),
+            conv1.sink.data.eq(pads_in_data),
+            conv4.sink.data.eq(pads_in_data),
+            conv8.sink.data.eq(pads_in_data),
+            Case(self.bus_width, {
+                # 1 is default
+                "default": conv1.source.connect(buf.sink),
+                BUSWIDTH_4: conv4.source.connect(buf.sink),
+                BUSWIDTH_8: conv8.source.connect(buf.sink),
+                }),
+            buf.source.connect(source),
         ]
 
 # SDCard PHY Init ----------------------------------------------------------------------------------
@@ -314,6 +346,7 @@ class SDPHYDATAW(Module, AutoCSR):
         self.pads_out = pads_out = stream.Endpoint(_sdpads_layout)
         self.sink     = sink     = stream.Endpoint([("data", 8)])
         self.stop     = Signal()
+        self.bus_width = Signal(2)
 
         self.status   = CSRStatus(fields=[
             CSRField("accepted",    size=1, offset=0),
@@ -363,10 +396,32 @@ class SDPHYDATAW(Module, AutoCSR):
             pads_out.data.oe.eq(1),
             pads_out.data.o.eq(0),
             If(pads_out.ready,
-                NextState("DATA")
+                If(self.bus_width == BUSWIDTH_1,
+                    NextState("DATA1")),
+                If(self.bus_width == BUSWIDTH_4,
+                    NextState("DATA4")),
+                If(self.bus_width == BUSWIDTH_8,
+                    NextState("DATA8")),
             )
         )
-        fsm.act("DATA",
+        fsm.act("DATA1",
+            self.stop.eq(~sink.valid),
+            pads_out.clk.eq(1),
+            pads_out.data.oe.eq(1),
+            Case(count, {i: pads_out.data.o.eq(sink.data[8-1-i]) for i in range(8)}),
+            If(pads_out.ready,
+                NextValue(count, count + 1),
+                If(count == (8-1),
+                    NextValue(count, 0),
+                    If(sink.last,
+                        NextState("STOP")
+                    ).Else(
+                        sink.ready.eq(1)
+                    )
+                )
+            )
+        )
+        fsm.act("DATA4",
             self.stop.eq(~sink.valid),
             pads_out.clk.eq(1),
             pads_out.data.oe.eq(1),
@@ -383,6 +438,19 @@ class SDPHYDATAW(Module, AutoCSR):
                     ).Else(
                         sink.ready.eq(1)
                     )
+                )
+            )
+        )
+        fsm.act("DATA8",
+            self.stop.eq(~sink.valid),
+            pads_out.clk.eq(1),
+            pads_out.data.oe.eq(1),
+            pads_out.data.o.eq(sink.data),
+            If(pads_out.ready,
+                If(sink.last,
+                    NextState("STOP")
+                ).Else(
+                    sink.ready.eq(1)
                 )
             )
         )
@@ -421,14 +489,16 @@ class SDPHYDATAR(Module):
         self.sink     = sink     = stream.Endpoint([("block_length", 10)])
         self.source   = source   = stream.Endpoint([("data", 8), ("status", 3)])
         self.stop     = Signal()
+        self.bus_width = Signal(2)
 
         # # #
 
         timeout = Signal(32, reset=int(data_timeout*sys_clk_freq))
         count   = Signal(10)
 
-        datar = SDPHYR(data=True, data_width=4, skip_start_bit=True)
+        datar = SDPHYR(data=True, skip_start_bit=True)
         self.comb += pads_in.connect(datar.pads_in)
+        self.comb += datar.bus_width.eq(self.bus_width)
         fsm = FSM(reset_state="IDLE")
         self.submodules += datar, fsm
         fsm.act("IDLE",
@@ -537,7 +607,7 @@ class SDPHYIOGen(SDPHYIO):
         )
 
         # Data
-        for i in range(4):
+        for i in range(len(pads.data)):
             self.specials += SDRTristate(
                 clk = ClockSignal("sys"),
                 io  = pads.data[i],
@@ -588,7 +658,7 @@ class SDPHYIOEmulator(SDPHYIO):
             If(sdpads.data.oe, pads.dat_i.eq(sdpads.data.o)),
             sdpads.data.i.eq(0b1111),
         ]
-        for i in range(4):
+        for i in range(len(pads.dat_t)):
             self.comb += If(~pads.dat_t[i], sdpads.data.i[i].eq(pads.dat_o[i]))
 
 # SDCard PHY ---------------------------------------------------------------------------------------
@@ -605,6 +675,9 @@ class SDPHY(Module, AutoCSR):
         self.submodules.cmdr    = cmdr    = SDPHYCMDR(sys_clk_freq, cmd_timeout, cmdw)
         self.submodules.dataw   = dataw   = SDPHYDATAW()
         self.submodules.datar   = datar   = SDPHYDATAR(sys_clk_freq, data_timeout)
+
+        # Default 4 for for backwards compatibility with older drivers
+        self.bus_width = CSRStorage(2, reset = BUSWIDTH_4)
 
         # # #
 
@@ -641,3 +714,7 @@ class SDPHY(Module, AutoCSR):
         card_detect_d = Signal()
         self.sync += card_detect_d.eq(self.card_detect.status)
         self.sync += self.card_detect_irq.eq(self.card_detect.status ^ card_detect_d)
+
+        # Bus width
+        self.comb += dataw.bus_width.eq(self.bus_width.storage)
+        self.comb += datar.bus_width.eq(self.bus_width.storage)

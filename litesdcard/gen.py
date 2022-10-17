@@ -33,22 +33,24 @@ from litex.soc.integration.builder import *
 
 # IOs ----------------------------------------------------------------------------------------------
 
-_io = [
-    # Clk / Rst.
-    ("clk", 0, Pins(1)),
-    ("rst", 1, Pins(1)),
+def _io(width):
+    assert width in (1,4,8)
+    return [
+        # Clk / Rst.
+        ("clk", 0, Pins(1)),
+        ("rst", 1, Pins(1)),
 
-    # Interrupt
-    ("irq", 0, Pins(1)),
+        # Interrupt
+        ("irq", 0, Pins(1)),
 
-    # SDCard Pads.
-    ("sdcard", 0,
-        Subsignal("data", Pins(4)), # Note: Requires Pullup (internal or external).
-        Subsignal("cmd",  Pins(1)), # Note: Requires Pullup (internal or external).
-        Subsignal("clk",  Pins(1)),
-        Subsignal("cd",   Pins(1)),
-    ),
-]
+        # SDCard Pads.
+        ("sdcard", 0,
+            Subsignal("data", Pins(width)), # Note: Requires Pullup (internal or external).
+            Subsignal("cmd",  Pins(1)), # Note: Requires Pullup (internal or external).
+            Subsignal("clk",  Pins(1)),
+            Subsignal("cd",   Pins(1)),
+        ),
+    ]
 
 # LiteSDCard Core ----------------------------------------------------------------------------------
 
@@ -96,6 +98,7 @@ def main():
     parser = argparse.ArgumentParser(description="LiteSDCard standalone core generator.")
     parser.add_argument("--clk-freq", default="100e6",  help="Input Clk Frequency.")
     parser.add_argument("--vendor",   default="xilinx", help="FPGA Vendor.")
+    parser.add_argument("--width",    default="4",      help="Data width, must be 1, 4 or 8)")
     args = parser.parse_args()
 
     # Convert/Check Arguments ----------------------------------------------------------------------------
@@ -106,9 +109,10 @@ def main():
         "intel"   : AlteraPlatform,
         "lattice" : LatticePlatform
     }[args.vendor]
+    width = int(args.width)
 
     # Generate core --------------------------------------------------------------------------------
-    platform = platform_cls(device="", io=_io)
+    platform = platform_cls(device="", io=_io(width))
     core     = LiteSDCardCore(platform, clk_freq=clk_freq)
     builder  = Builder(core, output_dir="build")
     builder.build(build_name="litesdcard_core", run=False)
